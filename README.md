@@ -3,7 +3,7 @@
 ## Our PoC team ❤️
 
 Developers
-| [<img src="https://github.com/ymehili.png?size=85" width=85><br>[Youssef Mehili]](https://github.com/ymehili) | [<img src="https://github.com/LixiosDelios.png?size=85" width=85><br><sub>[Alexandre Guillaud]</sub>](https://github.com/LixiosDelios) |
+| [<img src="https://github.com/ymehili.png?size=85" width=85><br>Youssef Mehili](https://github.com/ymehili) | [<img src="https://github.com/LixiosDelios.png?size=85" width=85><br><sub>[Alexandre Guillaud]</sub>](https://github.com/LixiosDelios) |
 | :---: | :---: |
 
 Manager
