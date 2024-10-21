@@ -7,7 +7,7 @@ Developers
 | :---: | :---: |
 
 Manager
-| [<img src="https://github.com/ramosleandre.png?size=85" width=85><br><sub>[Léandre Ramos]</sub>](https://github.com/ramosleandre)
+| [<img src="https://github.com/ramosleandre.png?size=85" width=85><br>Léandre Ramos](https://github.com/ramosleandre)
 | :---: |
 
 <h2 align=center>
