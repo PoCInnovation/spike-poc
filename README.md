@@ -3,7 +3,7 @@
 ## Our PoC team ❤️
 
 Developers
-| [<img src="https://github.com/ymehili.png?size=85" width=85><br>Youssef Mehili](https://github.com/ymehili) | [<img src="https://github.com/Esspyyy.png?size=85" width=85><br>Alexandre Guillaud]](https://github.com/Esspyyy) |
+| [<img src="https://github.com/ymehili.png?size=85" width=85><br>Youssef Mehili](https://github.com/ymehili) | [<img src="https://github.com/Esspyyy.png?size=85" width=85><br>Spencer Pay](https://github.com/Esspyyy) |
 | :---: | :---: |
 
 Manager
