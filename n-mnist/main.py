@@ -4,6 +4,7 @@ from torch.utils.data import DataLoader
 import torch
 import norse.torch as snn
 import matplotlib.pyplot as plt
+import torch.nn as nn
 
 # load le dataset
 transform = transforms.Compose([
@@ -45,3 +46,21 @@ for neuron_id, spikes in enumerate(spike_train.T):
 plt.xlabel("temps")
 plt.ylabel("neurone")
 plt.show()
+
+
+class SpikingNN(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.input_to_hidden = nn.Linear(784, 128) 
+        self.lif_hidden = snn.LIFCell()
+        self.hidden_to_output = nn.Linear(128, 10) 
+        self.lif_output = snn.LIFCell()
+
+    def forward(self, x, state_hidden=None, state_output=None):
+        x = self.input_to_hidden(x)
+        spikes_hidden, state_hidden = self.lif_hidden(x, state_hidden)
+
+        x = self.hidden_to_output(spikes_hidden)
+        spikes_output, state_output = self.lif_output(x, state_output)
+
+        return spikes_output, state_hidden, state_output
