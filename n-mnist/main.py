@@ -131,7 +131,7 @@ for epoch in range(epochs):
         total_loss += loss.item()
 
         # Print image index
-        print(f"Batch {batch_idx} / {num_batches}")
+        print(f"Batch {batch_idx + 1} / {num_batches}")
 
     print(f"Epoch [{epoch+1}/{epochs}], Loss: {total_loss / len(train_loader):.4f}")
 
