@@ -3,3 +3,5 @@ torchvision
 matplotlib
 norse
 bindsnet 
+tqdm
+operator

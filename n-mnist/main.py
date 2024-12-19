@@ -6,6 +6,7 @@ from torchvision.datasets import MNIST
 from torch.utils.data import DataLoader
 from torchvision import transforms
 import norse.torch as snn
+from tqdm import tqdm
 
 # -----------------------------
 # Step 1: load le dataset
@@ -21,8 +22,9 @@ transform = transforms.Compose(
 train_dataset = MNIST(root="./data", train=True, download=True, transform=transform)
 test_dataset = MNIST(root="./data", train=False, download=True, transform=transform)
 
-train_loader = DataLoader(train_dataset, batch_size=6000, shuffle=True)
-test_loader = DataLoader(test_dataset, batch_size=6000, shuffle=False)
+# Reduce batch size for better memory usage and potentially faster convergence
+train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)
+test_loader = DataLoader(test_dataset, batch_size=128, shuffle=False)
 
 
 # -----------------------------
@@ -90,10 +92,33 @@ device = get_device()
 print(f"Using device: {device}")
 model = SpikingNN().to(device)
 optimizer = optim.Adam(model.parameters(), lr=1e-3)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 
+                                                      mode='min', 
+                                                      patience=5, 
+                                                      factor=0.1)
 loss_fn = nn.CrossEntropyLoss()
 
 time_steps = 100 # duree des spike trains
 epochs = 3
+
+class EarlyStopping:
+    def __init__(self, patience=7, min_delta=0):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.counter = 0
+        self.best_loss = None
+        self.early_stop = False
+
+    def __call__(self, val_loss):
+        if self.best_loss is None:
+            self.best_loss = val_loss
+        elif val_loss > self.best_loss - self.min_delta:
+            self.counter += 1
+            if self.counter >= self.patience:
+                self.early_stop = True
+        else:
+            self.best_loss = val_loss
+            self.counter = 0
 
 # training loop
 for epoch in range(epochs):
@@ -102,38 +127,38 @@ for epoch in range(epochs):
     num_batches = len(train_loader)
     print(f"Number of batches: {num_batches}")
 
-    for batch_idx, (images, labels) in enumerate(train_loader):
-        images, labels = images.to(device), labels.to(device)
+    with tqdm(train_loader, desc=f'Epoch {epoch+1}/{epochs}') as pbar:
+        for batch_idx, (images, labels) in enumerate(pbar):
+            images, labels = images.to(device), labels.to(device)
 
-        # on encode les entrées en spike trains
-        spikes_input = poisson_encoder(images, time_steps)
+            # on encode les entrées en spike trains
+            spikes_input = poisson_encoder(images, time_steps)
 
-        state_hidden = model.lif_hidden.initial_state(torch.zeros(images.size(0), 128).to(device))
-        state_output = model.lif_output.initial_state(torch.zeros(images.size(0), 10).to(device))
+            state_hidden = model.lif_hidden.initial_state(torch.zeros(images.size(0), 128).to(device))
+            state_output = model.lif_output.initial_state(torch.zeros(images.size(0), 10).to(device))
 
-        # forward pass
-        spike_outputs = []
-        for t in range(time_steps):
-            spike_output, state_hidden, state_output = model(
-                spikes_input[t], state_hidden, state_output
-            )
-            spike_outputs.append(spike_output)
+            # forward pass
+            spike_outputs = []
+            for t in range(time_steps):
+                spike_output, state_hidden, state_output = model(
+                    spikes_input[t], state_hidden, state_output
+                )
+                spike_outputs.append(spike_output)
 
-        spike_outputs = torch.stack(spike_outputs).mean(dim=0)
+            spike_outputs = torch.stack(spike_outputs).mean(dim=0)
 
-        # loss et changement des poids
-        loss = loss_fn(spike_outputs, labels)
-        print(f"Loss: {loss.item()}")
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+            # loss et changement des poids
+            loss = loss_fn(spike_outputs, labels)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
-        total_loss += loss.item()
+            total_loss += loss.item()
 
-        # Print image index
-        print(f"Batch {batch_idx + 1} / {num_batches}")
+            pbar.set_postfix({'loss': loss.item()})
 
     print(f"Epoch [{epoch+1}/{epochs}], Loss: {total_loss / len(train_loader):.4f}")
+    scheduler.step(total_loss / len(train_loader))
 
 model.eval()
 correct = 0
