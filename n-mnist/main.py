@@ -22,9 +22,8 @@ transform = transforms.Compose(
 train_dataset = MNIST(root="./data", train=True, download=True, transform=transform)
 test_dataset = MNIST(root="./data", train=False, download=True, transform=transform)
 
-# Reduce batch size for better memory usage and potentially faster convergence
-train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)
-test_loader = DataLoader(test_dataset, batch_size=128, shuffle=False)
+train_loader = DataLoader(train_dataset, batch_size=100, shuffle=True)
+test_loader = DataLoader(test_dataset, batch_size=100, shuffle=False)
 
 
 # -----------------------------
@@ -91,15 +90,15 @@ def get_device():
 device = get_device()
 print(f"Using device: {device}")
 model = SpikingNN().to(device)
-optimizer = optim.Adam(model.parameters(), lr=1e-3)
+optimizer = optim.Adam(model.parameters(), lr=5e-4)
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 
                                                       mode='min', 
                                                       patience=5, 
                                                       factor=0.1)
-loss_fn = nn.CrossEntropyLoss()
+loss_fn = nn.MSELoss()
 
 time_steps = 100 # duree des spike trains
-epochs = 3
+epochs = 20
 
 class EarlyStopping:
     def __init__(self, patience=7, min_delta=0):
@@ -146,8 +145,12 @@ for epoch in range(epochs):
 
             spike_outputs = torch.stack(spike_outputs).mean(dim=0)
 
+            # convert en one hot pour le mse
+            target_one_hot = torch.zeros(labels.size(0), 10, device=device)
+            target_one_hot.scatter_(1, labels.unsqueeze(1), 1)
+
             # loss et changement des poids
-            loss = loss_fn(spike_outputs, labels)
+            loss = loss_fn(spike_outputs, target_one_hot)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
