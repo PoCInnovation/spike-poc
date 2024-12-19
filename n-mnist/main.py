@@ -125,7 +125,6 @@ for epoch in range(epochs):
     model.train()
     total_loss = 0
     num_batches = len(train_loader)
-    print(f"Number of batches: {num_batches}")
 
     with tqdm(train_loader, desc=f'Epoch {epoch+1}/{epochs}') as pbar:
         for batch_idx, (images, labels) in enumerate(pbar):
@@ -156,8 +155,6 @@ for epoch in range(epochs):
             total_loss += loss.item()
 
             pbar.set_postfix({'loss': loss.item()})
-
-    print(f"Epoch [{epoch+1}/{epochs}], Loss: {total_loss / len(train_loader):.4f}")
     scheduler.step(total_loss / len(train_loader))
 
 model.eval()
