@@ -7,6 +7,13 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 import norse.torch as snn
 from tqdm import tqdm
+from colorama import init, Fore, Style
+import multiprocessing
+from torch.amp import autocast, GradScaler
+
+# Initialize colorama
+init()
+num_workers = multiprocessing.cpu_count()
 
 # -----------------------------
 # Step 1: load le dataset
@@ -22,8 +29,20 @@ transform = transforms.Compose(
 train_dataset = MNIST(root="./data", train=True, download=True, transform=transform)
 test_dataset = MNIST(root="./data", train=False, download=True, transform=transform)
 
-train_loader = DataLoader(train_dataset, batch_size=100, shuffle=True)
-test_loader = DataLoader(test_dataset, batch_size=100, shuffle=False)
+train_loader = DataLoader(
+    train_dataset,
+    batch_size=100,
+    shuffle=True,
+    num_workers=num_workers,
+    pin_memory=True,
+)
+test_loader = DataLoader(
+    test_dataset,
+    batch_size=100,
+    shuffle=False,
+    num_workers=num_workers,
+    pin_memory=True,
+)
 
 
 # -----------------------------
@@ -31,10 +50,12 @@ test_loader = DataLoader(test_dataset, batch_size=100, shuffle=False)
 # -----------------------------
 def poisson_encoder(images, time_steps: int):
     batch_size = images.shape[0]
-    images = images.view(batch_size, -1) # 28x28 -> 784
-    spikes = torch.rand(time_steps, batch_size, images.shape[1]).to(images.device)
+    images = images.view(batch_size, -1)
+    spikes = torch.empty(time_steps, batch_size, images.shape[1], device=images.device)
+    spikes.uniform_()
     spikes = (spikes < images.unsqueeze(0)).float()
     return spikes
+
 
 # -----------------------------
 # Step 3: creation du SNN
@@ -56,6 +77,7 @@ class SpikingNN(nn.Module):
         spikes_output, state_output = self.lif_output(x, state_output)
 
         return spikes_output, state_hidden, state_output
+
 
 # -----------------------------
 # Test du SNN
@@ -87,55 +109,116 @@ def get_device():
     return torch.device("cpu")
 
 
-device = get_device()
-print(f"Using device: {device}")
-model = SpikingNN().to(device)
-optimizer = optim.Adam(model.parameters(), lr=5e-4)
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 
-                                                      mode='min', 
-                                                      patience=5, 
-                                                      factor=0.1)
-loss_fn = nn.MSELoss()
+if __name__ == "__main__":
+    device = get_device()
+    print(f"Using device: {device}")
+    model = SpikingNN().to(device)
+    optimizer = optim.Adam(model.parameters(), lr=5e-4)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="min", patience=5, factor=0.1
+    )
+    loss_fn = nn.MSELoss()
+    scaler = GradScaler()
 
-time_steps = 100 # duree des spike trains
-epochs = 20
+    time_steps = 100  # duree des spike trains
+    epochs = 20
 
-class EarlyStopping:
-    def __init__(self, patience=7, min_delta=0):
-        self.patience = patience
-        self.min_delta = min_delta
-        self.counter = 0
-        self.best_loss = None
-        self.early_stop = False
-
-    def __call__(self, val_loss):
-        if self.best_loss is None:
-            self.best_loss = val_loss
-        elif val_loss > self.best_loss - self.min_delta:
-            self.counter += 1
-            if self.counter >= self.patience:
-                self.early_stop = True
-        else:
-            self.best_loss = val_loss
+    class EarlyStopping:
+        def __init__(self, patience=7, min_delta=0):
+            self.patience = patience
+            self.min_delta = min_delta
             self.counter = 0
+            self.best_loss = None
+            self.early_stop = False
 
-# training loop
-for epoch in range(epochs):
-    model.train()
-    total_loss = 0
-    num_batches = len(train_loader)
+        def __call__(self, val_loss):
+            if self.best_loss is None:
+                self.best_loss = val_loss
+            elif val_loss > self.best_loss - self.min_delta:
+                self.counter += 1
+                if self.counter >= self.patience:
+                    self.early_stop = True
+            else:
+                self.best_loss = val_loss
+                self.counter = 0
 
-    with tqdm(train_loader, desc=f'Epoch {epoch+1}/{epochs}') as pbar:
-        for batch_idx, (images, labels) in enumerate(pbar):
-            images, labels = images.to(device), labels.to(device)
+    # training loop
+    for epoch in range(epochs):
+        model.train()
+        total_loss = 0
+        num_batches = len(train_loader)
 
-            # on encode les entrées en spike trains
+        with tqdm(
+            train_loader, desc=f"{Fore.CYAN}Epoch {epoch+1}/{epochs}{Style.RESET_ALL}"
+        ) as pbar:
+            for batch_idx, (images, labels) in enumerate(pbar):
+                images, labels = images.to(device), labels.to(device)
+
+                optimizer.zero_grad()
+
+                with autocast("cuda"):
+                    # on encode les entrées en spike trains
+                    spikes_input = poisson_encoder(images, time_steps)
+
+                    state_hidden = model.lif_hidden.initial_state(
+                        torch.zeros(images.size(0), 128).to(device)
+                    )
+                    state_output = model.lif_output.initial_state(
+                        torch.zeros(images.size(0), 10).to(device)
+                    )
+
+                    # forward pass
+                    spike_outputs = []
+                    for t in range(time_steps):
+                        spike_output, state_hidden, state_output = model(
+                            spikes_input[t], state_hidden, state_output
+                        )
+                        spike_outputs.append(spike_output)
+
+                    spike_outputs = torch.stack(spike_outputs).mean(dim=0)
+
+                    # convert en one hot pour le mse
+                    target_one_hot = torch.zeros(labels.size(0), 10, device=device)
+                    target_one_hot.scatter_(1, labels.unsqueeze(1), 1)
+
+                    # loss et changement des poids
+                    loss = loss_fn(spike_outputs, target_one_hot)
+
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+
+                total_loss += loss.item()
+                pbar.set_postfix(
+                    {"loss": f"{Fore.YELLOW}{loss.item():.4f}{Style.RESET_ALL}"}
+                )
+
+            # Print average loss at the end of epoch
+            avg_loss = total_loss / len(train_loader)
+            print(
+                f"{Fore.GREEN}Epoch {epoch+1} - Average Loss: {avg_loss:.4f}{Style.RESET_ALL}"
+            )
+
+        scheduler.step(total_loss / len(train_loader))
+
+    model.eval()
+    correct = 0
+    total = 0
+
+    with torch.no_grad():
+        for images, labels in test_loader:
+            images, labels = images.to(device, non_blocking=True), labels.to(
+                device, non_blocking=True
+            )
+
             spikes_input = poisson_encoder(images, time_steps)
+            state_hidden = model.lif_hidden.initial_state(
+                torch.zeros(images.size(0), 128).to(device)
+            )
+            state_output = model.lif_output.initial_state(
+                torch.zeros(images.size(0), 10).to(device)
+            )
 
-            state_hidden = model.lif_hidden.initial_state(torch.zeros(images.size(0), 128).to(device))
-            state_output = model.lif_output.initial_state(torch.zeros(images.size(0), 10).to(device))
-
-            # forward pass
             spike_outputs = []
             for t in range(time_steps):
                 spike_output, state_hidden, state_output = model(
@@ -144,48 +227,11 @@ for epoch in range(epochs):
                 spike_outputs.append(spike_output)
 
             spike_outputs = torch.stack(spike_outputs).mean(dim=0)
+            _, predicted = spike_outputs.max(1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
 
-            # convert en one hot pour le mse
-            target_one_hot = torch.zeros(labels.size(0), 10, device=device)
-            target_one_hot.scatter_(1, labels.unsqueeze(1), 1)
-
-            # loss et changement des poids
-            loss = loss_fn(spike_outputs, target_one_hot)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-            total_loss += loss.item()
-
-            pbar.set_postfix({'loss': loss.item()})
-    scheduler.step(total_loss / len(train_loader))
-
-model.eval()
-correct = 0
-total = 0
-
-with torch.no_grad():
-    for images, labels in test_loader:
-        images, labels = images.to(device), labels.to(device)
-
-        spikes_input = poisson_encoder(images, time_steps)
-        state_hidden = model.lif_hidden.initial_state(
-            torch.zeros(images.size(0), 128).to(device)
-        )
-        state_output = model.lif_output.initial_state(
-            torch.zeros(images.size(0), 10).to(device)
-        )
-
-        spike_outputs = []
-        for t in range(time_steps):
-            spike_output, state_hidden, state_output = model(
-                spikes_input[t], state_hidden, state_output
-            )
-            spike_outputs.append(spike_output)
-
-        spike_outputs = torch.stack(spike_outputs).mean(dim=0)
-        _, predicted = spike_outputs.max(1)
-        total += labels.size(0)
-        correct += (predicted == labels).sum().item()
-
-print(f"Test Accuracy: {100 * correct / total:.2f}%")
+    # Add color to final accuracy output
+    print(
+        f"{Fore.GREEN}Test Accuracy: {Fore.YELLOW}{100 * correct / total:.2f}%{Style.RESET_ALL}"
+    )

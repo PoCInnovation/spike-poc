@@ -5,3 +5,4 @@ norse
 bindsnet 
 tqdm
 operator
+colorama
