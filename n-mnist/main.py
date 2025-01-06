@@ -1,235 +1,185 @@
-from operator import index
-import torch 
-import torch.nn as nn 
-import torch.optim as optim 
-from torchvision.datasets import MNIST 
-from torch.utils.data import DataLoader 
-from torchvision import transforms  
-import norse.torch as snn  
-from tqdm import tqdm  
+import numpy as np
+from torchvision.datasets import MNIST
+from torchvision import transforms
+from tqdm import tqdm
 from colorama import init, Fore, Style
 import multiprocessing
-from torch.amp import autocast, GradScaler
+from collections import namedtuple
 
 # Initialize colorama
-init()  # initialise colorama pour la coloration du terminal
-num_workers = multiprocessing.cpu_count()  # définit le nombre de workers égal au nombre de coeurs cpu
+init()
 
-# -----------------------------
-# Step 1: load le dataset
-# -----------------------------
-
-transform = transforms.Compose(
-    [
-        transforms.ToTensor(),  # Convertit les images en tenseurs pytorch
-        transforms.Normalize((0.5,), (0.5,)),  # Normalise les valeurs des images entre -1 et 1
-    ]
-)
-
-train_dataset = MNIST(root="./data", train=True, download=True, transform=transform)  # charge le dataset d'entrainement
-test_dataset = MNIST(root="./data", train=False, download=True, transform=transform)  # charge le dataset de test
-
-train_loader = DataLoader(
-    train_dataset,
-    batch_size=100,
-    shuffle=True,  # mélange les données à chaque epoch
-    num_workers=num_workers,
-    pin_memory=True,  # opti
-)
-test_loader = DataLoader(
-    test_dataset,
-    batch_size=100,
-    shuffle=False,
-    num_workers=num_workers,
-    pin_memory=True,
-)
+# LIF Neuron State holder
+LIFState = namedtuple("LIFState", ["v", "i"])
 
 
-# -----------------------------
-# Step 2: on encode en spike train
-# -----------------------------
-def poisson_encoder(images, time_steps: int):
-    batch_size = images.shape[0]
-    images = images.view(batch_size, -1)  # flatten les images
-    spikes = torch.empty(time_steps, batch_size, images.shape[1], device=images.device)  # cree un tenseur vide pour les spikes.
-    spikes.uniform_()  # Remplit le tenseur avec des valeurs uniformes.
-    spikes = (spikes < images.unsqueeze(0)).float()  # encode les spikes en fonction des intensités des images
-    return spikes
+class LIFCell:
+    def __init__(self, tau_mem=20.0, v_threshold=1.0):
+        self.tau_mem = tau_mem
+        self.v_threshold = v_threshold
+
+    def initial_state(self, batch_size, n_neurons):
+        return LIFState(
+            v=np.zeros((batch_size, n_neurons)), i=np.zeros((batch_size, n_neurons))
+        )
+
+    def forward(self, x, state):
+        # Compute new membrane potential
+        dv = (x - state.v) / self.tau_mem
+        v_new = state.v + dv
+
+        # Generate spikes
+        spikes = (v_new >= self.v_threshold).astype(float)
+
+        # Reset membrane potential where spikes occurred
+        v_new *= 1 - spikes
+
+        return spikes, LIFState(v=v_new, i=x)
 
 
-# -----------------------------
-# Step 3: creation du SNN
-# -----------------------------
-class SpikingNN(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.input_to_hidden = nn.Linear(784, 128)  # couche linéaire d'entrée vers cachée
-        self.lif_hidden = snn.LIFCell()  # cellule LIF pour la couche cachée.
+class SpikingNN:
+    def __init__(self, input_size=784, hidden_size=128, output_size=10):
+        self.weights1 = np.random.randn(input_size, hidden_size) * 0.01
+        self.weights2 = np.random.randn(hidden_size, output_size) * 0.01
 
-        self.hidden_to_output = nn.Linear(128, 10)  # couche linéaire de cachée vers sortie
-        self.lif_output = snn.LIFCell()  # cellule LIF pour la couche de sortie.
+        self.lif_hidden = LIFCell()
+        self.lif_output = LIFCell()
 
     def forward(self, x, state_hidden=None, state_output=None):
-        x = self.input_to_hidden(x)  # Applique la couche d'entrée vers cachée.
-        spikes_hidden, state_hidden = self.lif_hidden(x, state_hidden)  # Passe à travers la cellule LIF cachée.
+        batch_size = x.shape[0]
 
-        x = self.hidden_to_output(spikes_hidden)  # applique la couche cachée vers sortie.
-        spikes_output, state_output = self.lif_output(x, state_output)  # passe à travers la cellule LIF de sortie.
+        if state_hidden is None:
+            state_hidden = self.lif_hidden.initial_state(batch_size, 128)
+        if state_output is None:
+            state_output = self.lif_output.initial_state(batch_size, 10)
 
-        return spikes_output, state_hidden, state_output  # Retourne les spikes et les états.
+        # Hidden layer
+        hidden = np.dot(x, self.weights1)
+        spikes_hidden, state_hidden = self.lif_hidden.forward(hidden, state_hidden)
 
+        # Output layer
+        output = np.dot(spikes_hidden, self.weights2)
+        spikes_output, state_output = self.lif_output.forward(output, state_output)
 
-# -----------------------------
-# Test du SNN
-# -----------------------------
-
-# batch_size = 64
-# time_steps = 100
-# spike_input = torch.rand(time_steps, batch_size, 784)  # Génère des spike trains aléatoires.
-
-# Properly initialize states
-# state_hidden = model.lif_hidden.initial_state(torch.zeros([batch_size, 128]))
-# state_output = model.lif_output.initial_state(torch.zeros([batch_size, 10]))
-
-# Forward pass over time
-# for t in range(time_steps):
-#     spike_output, state_hidden, state_output = model(
-#         spike_input[t], state_hidden, state_output
-#     )
-
-# print("Output shape:", spike_output.shape)
+        return spikes_output, state_hidden, state_output
 
 
-# initialisation
-def get_device():
-    if torch.backends.mps.is_available():
-        return torch.device("mps") # pour mac
-    if torch.cuda.is_available():
-        return torch.device("cuda")  # pour gpu
-    return torch.device("cpu")  # pour cpu
+def poisson_encoder(images, time_steps):
+    batch_size = images.shape[0]
+    flat_images = images.reshape(batch_size, -1)
+    spikes = np.random.random((time_steps, batch_size, flat_images.shape[1]))
+    return (spikes < flat_images).astype(float)
+
+
+def to_numpy(tensor):
+    return tensor.cpu().numpy()
 
 
 if __name__ == "__main__":
-    device = get_device()
-    print(f"Using device: {device}")
-    model = SpikingNN().to(device)  # initialise le modèle
-    optimizer = optim.Adam(model.parameters(), lr=5e-4)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", patience=5, factor=0.1
-    )  # ???
-    loss_fn = nn.MSELoss()
-    scaler = GradScaler()  # ???
+    # Load MNIST with PyTorch
+    transform = transforms.Compose(
+        [transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))]
+    )
 
-    time_steps = 100  # Durée des spike trains.
+    train_dataset = MNIST(root="./data", train=True, download=True, transform=transform)
+    test_dataset = MNIST(root="./data", train=False, download=True, transform=transform)
+
+    # Convert to numpy arrays
+    X_train = to_numpy(train_dataset.data).reshape(-1, 784) / 255.0
+    y_train = to_numpy(train_dataset.targets)
+    X_test = to_numpy(test_dataset.data).reshape(-1, 784) / 255.0
+    y_test = to_numpy(test_dataset.targets)
+
+    # Initialize model and parameters
+    model = SpikingNN()
+    learning_rate = 0.001
+    time_steps = 100
+    batch_size = 100
     epochs = 20
 
-    class EarlyStopping:
-        def __init__(self, patience=7, min_delta=0):
-            self.patience = patience  # temps avant arrêt.
-            self.min_delta = min_delta  # delta minimal pour une amélioration
-            self.counter = 0  # compteur de non améliorations
-            self.best_loss = None
-            self.early_stop = False # si a true, arrête l'entraînement
+    # Training loop
+    n_batches = len(X_train) // batch_size
 
-        def __call__(self, val_loss):
-            if self.best_loss is None:
-                self.best_loss = val_loss 
-            elif val_loss > self.best_loss - self.min_delta:
-                self.counter += 1
-                if self.counter >= self.patience:
-                    self.early_stop = True
-            else:
-                self.best_loss = val_loss 
-                self.counter = 0 
-
-    # training loop
     for epoch in range(epochs):
-        model.train()  # met le modèle en mode entraînement
-        total_loss = 0  # initialise la perte par epoch
-        num_batches = len(train_loader)  # nombre de batches par epoch
+        total_loss = 0
 
         with tqdm(
-            train_loader, desc=f"{Fore.CYAN}Epoch {epoch+1}/{epochs}{Style.RESET_ALL}"
+            range(n_batches),
+            desc=f"{Fore.CYAN}Epoch {epoch+1}/{epochs}{Style.RESET_ALL}",
         ) as pbar:
-            for batch_idx, (images, labels) in enumerate(pbar):
-                images, labels = images.to(device), labels.to(device)
+            for batch_idx in pbar:
+                start_idx = batch_idx * batch_size
+                end_idx = start_idx + batch_size
 
-                optimizer.zero_grad()  # reinitialise les gradients
+                batch_x = X_train[start_idx:end_idx]
+                batch_y = y_train[start_idx:end_idx]
 
-                with autocast("cuda"):
-                    # on encode les entrées en spike trains
-                    spikes_input = poisson_encoder(images, time_steps)  # Encode les images en spike trains.
+                # Create one-hot encoded targets
+                targets = np.zeros((batch_size, 10))
+                targets[np.arange(batch_size), batch_y] = 1
 
-                    state_hidden = model.lif_hidden.initial_state(
-                        torch.zeros(images.size(0), 128).to(device)
-                    )  # initialise le hidden state
-                    state_output = model.lif_output.initial_state(
-                        torch.zeros(images.size(0), 10).to(device)
-                    )  # Initialise l'output state
+                # Forward pass
+                spikes_input = poisson_encoder(batch_x, time_steps)
+                spike_outputs = []
 
-                    # forward pass
-                    spike_outputs = []
-                    for t in range(time_steps):
-                        spike_output, state_hidden, state_output = model(
-                            spikes_input[t], state_hidden, state_output
-                        )  # passe les spikes à travers le modèle
-                        spike_outputs.append(spike_output)  # Ajoute la sortie aux spikes.
+                state_hidden = None
+                state_output = None
 
-                    spike_outputs = torch.stack(spike_outputs).mean(dim=0)  # Moyenne les sorties sur le temps.
+                for t in range(time_steps):
+                    spike_output, state_hidden, state_output = model.forward(
+                        spikes_input[t], state_hidden, state_output
+                    )
+                    spike_outputs.append(spike_output)
 
-                    # convert en one hot pour le mse
-                    target_one_hot = torch.zeros(labels.size(0), 10, device=device)  # cree un tensor cible.
-                    target_one_hot.scatter_(1, labels.unsqueeze(1), 1)  # Convertit les labels en one-hot.
+                spike_outputs = np.mean(np.stack(spike_outputs), axis=0)
 
-                    # loss et changement des poids
-                    loss = loss_fn(spike_outputs, target_one_hot)  # calcule la perte
+                # Compute loss (MSE)
+                loss = np.mean((spike_outputs - targets) ** 2)
+                total_loss += loss
 
-                scaler.scale(loss).backward()  # backpropagation avec scaling
-                scaler.step(optimizer)  # met à jour les poids
-                scaler.update()  # met à jour le scaler
+                # Simple gradient descent update
+                error = spike_outputs - targets
 
-                total_loss += loss.item()  # accumule la perte
-                pbar.set_postfix(
-                    {"loss": f"{Fore.YELLOW}{loss.item():.4f}{Style.RESET_ALL}"}
-                )  # affiche la perte dans la barre de progression.
+                # Update weights (simplified backprop)
+                model.weights2 -= learning_rate * np.dot(state_hidden.v.T, error)
+                hidden_error = np.dot(error, model.weights2.T)
+                model.weights1 -= learning_rate * np.dot(batch_x.T, hidden_error)
 
-            avg_loss = total_loss / len(train_loader)  # calcule la perte moyenne.
-            print(
-                f"{Fore.GREEN}Epoch {epoch+1} - Average Loss: {avg_loss:.4f}{Style.RESET_ALL}"
-            )  # affiche la perte moyenne.
+                pbar.set_postfix({"loss": f"{Fore.YELLOW}{loss:.4f}{Style.RESET_ALL}"})
 
-        scheduler.step(total_loss / len(train_loader))  # met à jour le scheduler.
+        avg_loss = total_loss / n_batches
+        print(
+            f"{Fore.GREEN}Epoch {epoch+1} - Average Loss: {avg_loss:.4f}{Style.RESET_ALL}"
+        )
 
-    model.eval() 
+    # Testing
     correct = 0
     total = 0
+    n_test_batches = len(X_test) // batch_size
 
-    with torch.no_grad():
-        for images, labels in test_loader:
-            images, labels = images.to(device, non_blocking=True), labels.to(
-                device, non_blocking=True
+    for batch_idx in range(n_test_batches):
+        start_idx = batch_idx * batch_size
+        end_idx = start_idx + batch_size
+
+        batch_x = X_test[start_idx:end_idx]
+        batch_y = y_test[start_idx:end_idx]
+
+        spikes_input = poisson_encoder(batch_x, time_steps)
+        spike_outputs = []
+        state_hidden = None
+        state_output = None
+
+        for t in range(time_steps):
+            spike_output, state_hidden, state_output = model.forward(
+                spikes_input[t], state_hidden, state_output
             )
+            spike_outputs.append(spike_output)
 
-            spikes_input = poisson_encoder(images, time_steps)
-            state_hidden = model.lif_hidden.initial_state(
-                torch.zeros(images.size(0), 128).to(device)
-            )
-            state_output = model.lif_output.initial_state(
-                torch.zeros(images.size(0), 10).to(device)
-            )
+        spike_outputs = np.mean(np.stack(spike_outputs), axis=0)
+        predictions = np.argmax(spike_outputs, axis=1)
 
-            spike_outputs = []
-            for t in range(time_steps):
-                spike_output, state_hidden, state_output = model(
-                    spikes_input[t], state_hidden, state_output
-                ) 
-                spike_outputs.append(spike_output) 
+        correct += np.sum(predictions == batch_y)
+        total += batch_size
 
-            spike_outputs = torch.stack(spike_outputs).mean(dim=0)
-            _, predicted = spike_outputs.max(1) 
-            total += labels.size(0) 
-            correct += (predicted == labels).sum().item() 
-
-    print(
-        f"{Fore.GREEN}Test Accuracy: {Fore.YELLOW}{100 * correct / total:.2f}%{Style.RESET_ALL}"
-    )
+    accuracy = 100 * correct / total
+    print(f"{Fore.GREEN}Test Accuracy: {Fore.YELLOW}{accuracy:.2f}%{Style.RESET_ALL}")
