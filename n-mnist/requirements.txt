@@ -4,5 +4,5 @@ matplotlib
 norse
 bindsnet 
 tqdm
-operator
 colorama
+multiprocessing
