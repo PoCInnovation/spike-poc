@@ -38,7 +38,7 @@ By completing this workshop, you will be able to:
 
 ---
 
-##  M 🚀 Workshop Structure (Modules in `neuro-1.ipynb`)
+##  M 🚀 Workshop Structure (Modules in `neuro.ipynb`)
 
 1.  **Module 1: Neuromorphic Computing Fundamentals** (≈ 1.5 hours)
     *   What is NC? Biological inspiration.
